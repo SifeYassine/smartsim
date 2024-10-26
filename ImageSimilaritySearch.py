@@ -8,18 +8,20 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import AgglomerativeClustering
 import matplotlib.pyplot as plt
 from timm import create_model
+from transformers import CLIPProcessor, CLIPModel  # New imports
 import pickle
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk  # Added ttk for model selection
 import threading
 
 # Constants
 BATCH_SIZE = 16
-IMAGE_SIZE = (224, 224)
-MODEL_NAME = 'swin_base_patch4_window7_224'
+IMAGE_SIZE = (224, 224)  # Works for both models
+SWIN_MODEL_NAME = 'swin_base_patch4_window7_224'
+CLIP_VIT_MODEL_NAME = 'openai/clip-vit-base-patch32'
 NORMALIZE_MEAN = (0.485, 0.456, 0.406)
 NORMALIZE_STD = (0.229, 0.224, 0.225)
 
@@ -29,99 +31,126 @@ current_cluster_index = 0
 clusters = None
 model = None
 transform = None
+model_type = None  # New global variable to track current model type
 
 #-------------------------- Setup Logic -----------------------------#
 
-# Load a pre-trained Swin Transformer model and set to evaluation mode
-def setup_model_and_transform():
+# Modified to handle both models
+def setup_model_and_transform(model_type='swin'):
     global model, transform
     
-    model = create_model(MODEL_NAME, pretrained=True)
-    model.head = torch.nn.Identity()
+    if model_type == 'swin':
+        print("Setting up Swin Transformer...")
+        model = create_model(SWIN_MODEL_NAME, pretrained=True)
+        model.head = torch.nn.Identity()
+        transform = transforms.Compose([
+            transforms.Resize(IMAGE_SIZE),
+            transforms.ToTensor(),
+            transforms.Normalize(NORMALIZE_MEAN, NORMALIZE_STD),
+        ])
+    elif model_type == 'clip':
+        print("Setting up CLIP with safetensors...")
+        model = CLIPModel.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True)
+        processor = CLIPProcessor.from_pretrained(CLIP_VIT_MODEL_NAME)
+        
+        def hf_preprocess(img):
+            return processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+
+        transform = hf_preprocess
+    
     model.eval()
     model = model.float()
-
-    # Define image transformations
-    transform = transforms.Compose([
-        transforms.Resize(IMAGE_SIZE),
-        transforms.ToTensor(),
-        transforms.Normalize(NORMALIZE_MEAN, NORMALIZE_STD),
-    ])
+    
     return model, transform
 
-#-------------------------- Feature Extraction Logic -----------------------------# 
+#-------------------------- Feature Extraction Logic -----------------------------#
 
-# Extract features from a batch of images
-def extract_features_batch(image_paths, model, transform):
+# Modified to handle both models
+def extract_features_batch(image_paths, model, transform, model_type='swin'):
     batch = [transform(Image.open(img_path).convert('RGB')) for img_path in image_paths]
     batch = torch.stack(batch)
     
     with torch.no_grad():
-        features = model(batch)
+        if model_type == 'swin':
+            features = model(batch)
+        else:  # clip
+            features = model.get_image_features(batch)
+        
         features = F.normalize(features, p=2, dim=1)
         features = features.cpu().numpy()
     return features
 
-# Extract features in parallel
-def extract_features_parallel(image_paths, model, transform, batch_size=BATCH_SIZE):
+
+# Modified to include model_type
+def extract_features_parallel(image_paths, model, transform, model_type='swin', batch_size=BATCH_SIZE):
     all_features = []
     
     with ThreadPoolExecutor() as executor:
         for i in tqdm(range(0, len(image_paths), batch_size), desc="Extracting features"):
             batch_paths = image_paths[i:i + batch_size]
-            batch_features = executor.submit(extract_features_batch, batch_paths, model, transform).result()
+            batch_features = executor.submit(extract_features_batch, batch_paths, model, transform, model_type).result()
             all_features.extend(batch_features)
     return all_features
 
-# Save and load features
-def save_features(features, filenames, features_file):
-    with open(features_file, 'wb') as f:
+# Save and load features - modified to include model type in filename
+def save_features(features, filenames, features_file, model_type):
+    base, ext = os.path.splitext(features_file)
+    model_specific_file = f"{base}_{model_type}{ext}"
+    with open(model_specific_file, 'wb') as f:
         pickle.dump((features, filenames), f)
+    return model_specific_file
 
-def load_features(features_file):
-    with open(features_file, 'rb') as f:
+def load_features(features_file, model_type):
+    base, ext = os.path.splitext(features_file)
+    model_specific_file = f"{base}_{model_type}{ext}"
+    with open(model_specific_file, 'rb') as f:
         return pickle.load(f)
 
-# Update features and filenames in the pickle file
-def update_features(dataset_folder, features_file, model, transform):
+# Modified to include model_type
+def update_features(dataset_folder, features_file, model, transform, model_type='swin'):
     image_list = os.listdir(dataset_folder)
     valid_extensions = ('.png', '.jpg', '.jpeg', '.jfif')
     dataset_filenames = [os.path.join(dataset_folder, img) for img in image_list if img.lower().endswith(valid_extensions)]
 
-    if os.path.exists(features_file):
-        existing_features, existing_filenames = load_features(features_file)
+    model_specific_file = features_file
+    if os.path.exists(model_specific_file):
+        existing_features, existing_filenames = load_features(features_file, model_type)
         new_image_paths = [img for img in dataset_filenames if img not in existing_filenames]
         
         if new_image_paths:
             print(f"Found {len(new_image_paths)} new images. Updating features...")
-            new_features = extract_features_parallel(new_image_paths, model, transform)
+            new_features = extract_features_parallel(new_image_paths, model, transform, model_type)
             updated_features = existing_features + new_features
             updated_filenames = existing_filenames + new_image_paths
             
-            save_features(updated_features, updated_filenames, features_file)
+            save_features(updated_features, updated_filenames, features_file, model_type)
             return updated_features, updated_filenames
         
         return existing_features, existing_filenames
     else:
         print(f"Extracting features for {len(dataset_filenames)} images...")
-        features = extract_features_parallel(dataset_filenames, model, transform)
-        save_features(features, dataset_filenames, features_file)
+        features = extract_features_parallel(dataset_filenames, model, transform, model_type)
+        save_features(features, dataset_filenames, features_file, model_type)
         return features, dataset_filenames
 
 #-------------------------- Similarity Calculations Logic -----------------------------#
 
-# Find similar images for an input image
-def find_similar_images(input_image_path, dataset_folder, features_file, model, transform, top_k, similarity_threshold):
+# Modified to handle both models
+def find_similar_images(input_image_path, dataset_folder, features_file, model, transform, top_k, similarity_threshold, model_type='swin'):
     image_to_transform = Image.open(input_image_path).convert('RGB')
     input_tensor = transform(image_to_transform).unsqueeze(0)
     
     with torch.no_grad():
-        input_features = model(input_tensor)
+        if model_type == 'swin':
+            input_features = model(input_tensor)
+        else:  # clip
+            input_features = model.get_image_features(input_tensor)
+        
         input_features = F.normalize(input_features, p=2, dim=1)
         input_features = input_features.cpu().numpy()
 
     input_features_reshaped = input_features.reshape(1, -1)
-    dataset_features, filenames = update_features(dataset_folder, features_file, model, transform)
+    dataset_features, filenames = update_features(dataset_folder, features_file, model, transform, model_type)
     dataset_features_reshaped = np.array(dataset_features).reshape(len(dataset_features), -1)
     
     similarities = cosine_similarity(input_features_reshaped, dataset_features_reshaped)[0]
@@ -134,9 +163,9 @@ def find_similar_images(input_image_path, dataset_folder, features_file, model, 
     sorted_indices = np.argsort(filtered_similarities)[-top_k-1:][::-1]
     return [(filenames[filtered_indices[idx]], filtered_similarities[idx]) for idx in sorted_indices]
 
-# Cluster similar images
-def cluster_similar_images(dataset_folder, features_file, model, transform, min_images_per_cluster, max_num_clusters):
-    features, image_paths = update_features(dataset_folder, features_file, model, transform)
+# Modified to include model_type
+def cluster_similar_images(dataset_folder, features_file, model, transform, min_images_per_cluster, max_num_clusters, model_type='swin'):
+    features, image_paths = update_features(dataset_folder, features_file, model, transform, model_type)
     features_reshaped = np.array(features).reshape(len(features), -1)
     
     similarity_matrix = cosine_similarity(features_reshaped)
@@ -153,12 +182,10 @@ def cluster_similar_images(dataset_folder, features_file, model, transform, min_
         clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=threshold,linkage='average')
         labels = clustering.fit_predict(distance_matrix)
         
-        # Map original indices to their labels
         init_clusters = defaultdict(list)
         for i, label in enumerate(labels):
             init_clusters[label].append(image_paths[i])
         
-        # Filter clusters based on minimum size
         valid_clusters = {k: v for k, v in init_clusters.items() if len(v) >= min_images_per_cluster}
         num_valid_clusters = len(valid_clusters)
         
@@ -238,7 +265,7 @@ def plot_image_clusters(clusters, cluster_index=0):
 
 def create_gui(root):
     root.title("Image Similarity & Clustering")
-    root.geometry("630x400")
+    root.geometry("630x450")  # Slightly taller to accommodate model selection
     
     def plot_the_figure(plot_function):
         if plot_function is None:
@@ -254,43 +281,40 @@ def create_gui(root):
             
             threading.Thread(target=run_process, daemon=True).start()
     
-    # Get dataset folder and update features_file
+    # Modified to update model type
     def get_dataset_folder(dataset_folder_entry):
-        global features_file
+        global features_file, model_type
         dataset_folder = filedialog.askdirectory()
         
         if dataset_folder:
             folder_name = os.path.basename(os.path.normpath(dataset_folder))
-            # Set the features file name based on the dataset folder's name
             features_file = f'{folder_name}_dataset_features.pkl'
             dataset_folder_entry.delete(0, tk.END)
             dataset_folder_entry.insert(0, dataset_folder)
             
             print(f"Features file set to: {features_file}")
     
-    # Get input image
     def get_image_path(input_image_entry):
         input_image = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.jfif")])
         if input_image:
             input_image_entry.delete(0, tk.END)
             input_image_entry.insert(0, input_image)
     
-    # Get and plot similar images
+    # Modified to use current model type
     def get_and_plot_similar_images():
         def run_similarity():
-            # Get dataset folder and input image
             input_image_path = input_image.get().strip()
             dataset_folder_path = dataset_folder.get().strip()
             
-            # Get similarity threshold and number of similar images
-            similarity_threshold = float(threshold.get()) if threshold.get().strip().isdigit() else 0.12
+            similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.12
             num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
+            current_model_type = model_type_var.get()
             
-            # Get model and run similarity
-            model, transform = setup_model_and_transform()
-            similar_images = find_similar_images(input_image_path, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold)
+            model, transform = setup_model_and_transform(current_model_type)
+            similar_images = find_similar_images(input_image_path, dataset_folder_path, features_file,
+                                              model, transform, num_similar_images, similarity_threshold,
+                                              current_model_type)
             
-            # Update GUI with results
             def update_gui():
                 if similar_images:
                     plot_function = plot_similar_images(similar_images)
@@ -302,23 +326,21 @@ def create_gui(root):
         
         threading.Thread(target=run_similarity, daemon=True).start()
     
-    # Get and plot image clusters
+    # Modified to use current model type
     def get_and_plot_image_clusters():
         def run_clustering():
-            # Get dataset folder
             dataset_folder_path = dataset_folder.get().strip()
             
-            # Get Min number of images per cluster and Max number of clusters
             min_cluster_size = int(min_num_images_per_cluster.get()) if min_num_images_per_cluster.get().isdigit() else 5
             max_clusters = int(max_num_clusters.get()) if max_num_clusters.get().isdigit() else 3
+            current_model_type = model_type_var.get()
             
-            # Get model and run clustering
-            model, transform = setup_model_and_transform()
+            model, transform = setup_model_and_transform(current_model_type)
             global clusters, current_cluster_index
             current_cluster_index = 0
-            clusters = cluster_similar_images(dataset_folder_path, features_file, model, transform, min_cluster_size, max_clusters)
+            clusters = cluster_similar_images(dataset_folder_path, features_file, model, transform,
+                                           min_cluster_size, max_clusters, current_model_type)
             
-            # Update GUI with results
             def update_gui():
                 if clusters:
                     plot_function = plot_image_clusters(clusters, cluster_index=0)
@@ -348,54 +370,62 @@ def create_gui(root):
     
     #-------------------------- GUI Layout ------------------------------#
     
-    tk.Label(root, text="Dataset Folder:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+    # Model selection
+    tk.Label(root, text="Model Type:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+    model_type_var = tk.StringVar(value="swin")
+    model_select = ttk.Combobox(root, textvariable=model_type_var, values=["swin", "clip"], state="readonly")
+    model_select.grid(row=0, column=1, padx=10, pady=10)
+    
+    # Dataset folder selection
+    tk.Label(root, text="Dataset Folder:").grid(row=1, column=0, padx=10, pady=10, sticky="e")
     dataset_folder = tk.Entry(root, width=40)
-    dataset_folder.grid(row=0, column=1, padx=10, pady=10)
-    tk.Button(root, text="Browse", command=lambda: get_dataset_folder(dataset_folder)).grid(row=0, column=2, padx=10, pady=10)
-    
-    # Input image selection
-    tk.Label(root, text="Input Image:").grid(row=1, column=0, padx=10, pady=10, sticky="e")
+    dataset_folder.grid(row=1, column=1, padx=10, pady=10)
+    tk.Button(root, text="Browse", command=lambda: get_dataset_folder(dataset_folder)).grid(row=1, column=2, padx=10, pady=10)
+
+    # Input image selection (move to the next row)
+    tk.Label(root, text="Input Image:").grid(row=2, column=0, padx=10, pady=10, sticky="e")
     input_image = tk.Entry(root, width=40)
-    input_image.grid(row=1, column=1, padx=10, pady=10)
-    tk.Button(root, text="Browse", command=lambda: get_image_path(input_image)).grid(row=1, column=2, padx=10, pady=10)
-    
+    input_image.grid(row=2, column=1, padx=10, pady=10)
+    tk.Button(root, text="Browse", command=lambda: get_image_path(input_image)).grid(row=2, column=2, padx=10, pady=10)
+
+    # Update the rest of the rows accordingly
     # Similarity threshold input
-    tk.Label(root, text="Similarity Threshold:").grid(row=2, column=0, padx=10, pady=10, sticky="e")
+    tk.Label(root, text="Similarity Threshold:").grid(row=3, column=0, padx=10, pady=10, sticky="e")
     threshold = tk.Entry(root)
     threshold.insert(0, "0.12")
-    threshold.grid(row=2, column=1, padx=10, pady=10)
-    
+    threshold.grid(row=3, column=1, padx=10, pady=10)
+
     # Number of similar images input (top_k)
-    tk.Label(root, text="Number of Similar Images:").grid(row=3, column=0, padx=10, pady=10, sticky="e")
+    tk.Label(root, text="Number of Similar Images:").grid(row=4, column=0, padx=10, pady=10, sticky="e")
     top_k = tk.Entry(root)
     top_k.insert(0, "5")
-    top_k.grid(row=3, column=1, padx=10, pady=10)
-    
+    top_k.grid(row=4, column=1, padx=10, pady=10)
+
     # Min number of images per cluster
-    tk.Label(root, text="Min Images per Cluster:").grid(row=4, column=0, padx=10, pady=10, sticky="e")
+    tk.Label(root, text="Min Images per Cluster:").grid(row=5, column=0, padx=10, pady=10, sticky="e")
     min_num_images_per_cluster = tk.Entry(root)
     min_num_images_per_cluster.insert(0, "5")
-    min_num_images_per_cluster.grid(row=4, column=1, padx=10, pady=10)
-    
+    min_num_images_per_cluster.grid(row=5, column=1, padx=10, pady=10)
+
     # Max number of clusters
-    tk.Label(root, text="Max Number of Clusters:").grid(row=5, column=0, padx=10, pady=10, sticky="e")
+    tk.Label(root, text="Max Number of Clusters:").grid(row=6, column=0, padx=10, pady=10, sticky="e")
     max_num_clusters = tk.Entry(root)
     max_num_clusters.insert(0, "3")
-    max_num_clusters.grid(row=5, column=1, padx=10, pady=10)
-    
-    # Buttons for choices
+    max_num_clusters.grid(row=6, column=1, padx=10, pady=10)
+
+    # Action frame for buttons
     action_frame = tk.Frame(root)
-    action_frame.grid(row=6, column=0, columnspan=3, padx=20, pady=10)
+    action_frame.grid(row=7, column=0, columnspan=3, padx=20, pady=10)
 
     tk.Button(action_frame, text="Find Similar Images", command=get_and_plot_similar_images).pack(side=tk.LEFT, padx=5)
     tk.Button(action_frame, text="Cluster Images", command=get_and_plot_image_clusters).pack(side=tk.LEFT, padx=5)
-    
-    # Buttons for navigation
+
+    # Navigation frame for navigation buttons
     nav_frame = tk.Frame(root)
-    nav_frame.grid(row=7, column=0, columnspan=3, padx=20, pady=10)
-    
+    nav_frame.grid(row=8, column=0, columnspan=3, padx=20, pady=10)
+
     tk.Button(nav_frame, text="Previous Cluster", command=previous_cluster).pack(side=tk.LEFT, padx=5)
-    tk.Button( nav_frame, text="Next Cluster", command=next_cluster).pack(side=tk.LEFT, padx=5)
+    tk.Button(nav_frame, text="Next Cluster", command=next_cluster).pack(side=tk.LEFT, padx=5)
 
 if __name__ == "__main__":
     root = tk.Tk()
