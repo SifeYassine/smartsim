@@ -136,7 +136,7 @@ def update_features(dataset_folder, features_file, model, transform, model_type=
 
 #-------------------------- Similarity Calculations Logic -----------------------------#
 
-# Modified to handle both models
+# Find similar images for an input image
 def find_similar_images(input_image_path, dataset_folder, features_file, model, transform, top_k, similarity_threshold, model_type='swin'):
     image_to_transform = Image.open(input_image_path).convert('RGB')
     input_tensor = transform(image_to_transform).unsqueeze(0)
@@ -164,7 +164,7 @@ def find_similar_images(input_image_path, dataset_folder, features_file, model, 
     sorted_indices = np.argsort(filtered_similarities)[-top_k-1:][::-1]
     return [(filenames[filtered_indices[idx]], filtered_similarities[idx]) for idx in sorted_indices]
 
-# Modified to include model_type
+# Cluster similar images
 def cluster_similar_images(dataset_folder, features_file, model, transform, min_images_per_cluster, max_num_clusters, model_type='swin'):
     features, image_paths = update_features(dataset_folder, features_file, model, transform, model_type)
     features_reshaped = np.array(features).reshape(len(features), -1)
@@ -183,10 +183,12 @@ def cluster_similar_images(dataset_folder, features_file, model, transform, min_
         clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=threshold,linkage='average')
         labels = clustering.fit_predict(distance_matrix)
         
+        # Map original indices to their labels
         init_clusters = defaultdict(list)
         for i, label in enumerate(labels):
             init_clusters[label].append(image_paths[i])
         
+        # Filter clusters based on minimum size
         valid_clusters = {k: v for k, v in init_clusters.items() if len(v) >= min_images_per_cluster}
         num_valid_clusters = len(valid_clusters)
         
@@ -266,7 +268,7 @@ def plot_image_clusters(clusters, cluster_index=0):
 
 def create_gui(root):
     root.title("Image Similarity & Clustering")
-    root.geometry("630x450")  # Slightly taller to accommodate model selection
+    root.geometry("630x450")
     
     def plot_the_figure(plot_function):
         if plot_function is None:
@@ -281,45 +283,50 @@ def create_gui(root):
                 root.after(0, lambda: handle_result(result))
             
             threading.Thread(target=run_process, daemon=True).start()
-            
+    
+    # Get model type        
     def get_model_type(model_type_var):
         global model_type
         model_type = model_type_var.get().strip()   
     
-    # Modified to update model type
+    # Get dataset folder and update features_file
     def get_dataset_folder(dataset_folder_entry):
         global features_file, model_type
         dataset_folder = filedialog.askdirectory()
         
         if dataset_folder:
             folder_name = os.path.basename(os.path.normpath(dataset_folder))
+            # Set the features file name based on the dataset folder's name
             features_file = f'{folder_name}_dataset_features_{model_type}.pkl'
             dataset_folder_entry.delete(0, tk.END)
             dataset_folder_entry.insert(0, dataset_folder)
             
             print(f"Features file set to: {features_file}")
     
+    # Get input image
     def get_image_path(input_image_entry):
         input_image = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.jfif")])
         if input_image:
             input_image_entry.delete(0, tk.END)
             input_image_entry.insert(0, input_image)
     
-    # Modified to use current model type
+    # Get and plot similar images
     def get_and_plot_similar_images():
         def run_similarity():
+            # Get dataset folder and input image
             input_image_path = input_image.get().strip()
             dataset_folder_path = dataset_folder.get().strip()
             
+            # Get similarity threshold and number of similar images
             similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.12
             num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
             current_model_type = model_type_entry.get()
             
+            # Get model and run similarity
             model, transform = setup_model_and_transform(current_model_type)
-            similar_images = find_similar_images(input_image_path, dataset_folder_path, features_file,
-                                              model, transform, num_similar_images, similarity_threshold,
-                                              current_model_type)
+            similar_images = find_similar_images(input_image_path, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
             
+            # Update GUI with results
             def update_gui():
                 if similar_images:
                     plot_function = plot_similar_images(similar_images)
@@ -331,21 +338,24 @@ def create_gui(root):
         
         threading.Thread(target=run_similarity, daemon=True).start()
     
-    # Modified to use current model type
+    # Get and plot image clusters
     def get_and_plot_image_clusters():
         def run_clustering():
+            # Get dataset folder
             dataset_folder_path = dataset_folder.get().strip()
             
+            # Get Min number of images per cluster and Max number of clusters
             min_cluster_size = int(min_num_images_per_cluster.get()) if min_num_images_per_cluster.get().isdigit() else 5
             max_clusters = int(max_num_clusters.get()) if max_num_clusters.get().isdigit() else 3
-            current_model_type = model_type_entry.get()
             
+            # Get model and run clustering
+            current_model_type = model_type_entry.get()
             model, transform = setup_model_and_transform(current_model_type)
             global clusters, current_cluster_index
             current_cluster_index = 0
-            clusters = cluster_similar_images(dataset_folder_path, features_file, model, transform,
-                                           min_cluster_size, max_clusters, current_model_type)
+            clusters = cluster_similar_images(dataset_folder_path, features_file, model, transform, min_cluster_size, max_clusters, current_model_type)
             
+            # Update GUI with results
             def update_gui():
                 if clusters:
                     plot_function = plot_image_clusters(clusters, cluster_index=0)
@@ -388,13 +398,12 @@ def create_gui(root):
     dataset_folder.grid(row=1, column=1, padx=10, pady=10)
     tk.Button(root, text="Browse", command=lambda: get_dataset_folder(dataset_folder)).grid(row=1, column=2, padx=10, pady=10)
 
-    # Input image selection (move to the next row)
+    # Input image selection
     tk.Label(root, text="Input Image:").grid(row=2, column=0, padx=10, pady=10, sticky="e")
     input_image = tk.Entry(root, width=40)
     input_image.grid(row=2, column=1, padx=10, pady=10)
     tk.Button(root, text="Browse", command=lambda: get_image_path(input_image)).grid(row=2, column=2, padx=10, pady=10)
 
-    # Update the rest of the rows accordingly
     # Similarity threshold input
     tk.Label(root, text="Similarity Threshold:").grid(row=3, column=0, padx=10, pady=10, sticky="e")
     threshold = tk.Entry(root)
@@ -423,6 +432,7 @@ def create_gui(root):
     action_frame = tk.Frame(root)
     action_frame.grid(row=7, column=0, columnspan=3, padx=20, pady=10)
 
+    # Buttons for choices
     tk.Button(action_frame, text="Find Similar Images", command=get_and_plot_similar_images).pack(side=tk.LEFT, padx=5)
     tk.Button(action_frame, text="Cluster Images", command=get_and_plot_image_clusters).pack(side=tk.LEFT, padx=5)
 
