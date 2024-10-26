@@ -8,18 +8,18 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import AgglomerativeClustering
 import matplotlib.pyplot as plt
 from timm import create_model
-from transformers import CLIPProcessor, CLIPModel  # New imports
+from transformers import CLIPProcessor, CLIPModel
 import pickle
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk  # Added ttk for model selection
+from tkinter import filedialog, messagebox, ttk
 import threading
 
 # Constants
 BATCH_SIZE = 16
-IMAGE_SIZE = (224, 224)  # Works for both models
+IMAGE_SIZE = (224, 224)
 SWIN_MODEL_NAME = 'swin_base_patch4_window7_224'
 CLIP_VIT_MODEL_NAME = 'openai/clip-vit-base-patch32'
 NORMALIZE_MEAN = (0.485, 0.456, 0.406)
@@ -31,23 +31,28 @@ current_cluster_index = 0
 clusters = None
 model = None
 transform = None
-model_type = None  # New global variable to track current model type
+model_type = 'swin'
 
 #-------------------------- Setup Logic -----------------------------#
 
-# Modified to handle both models
+# Load a pre-trained Swin Transformer model and set to evaluation mode
 def setup_model_and_transform(model_type='swin'):
     global model, transform
     
+    # Swin Model Setup
     if model_type == 'swin':
         print("Setting up Swin Transformer...")
         model = create_model(SWIN_MODEL_NAME, pretrained=True)
         model.head = torch.nn.Identity()
+        
+        # Define image transformations
         transform = transforms.Compose([
             transforms.Resize(IMAGE_SIZE),
             transforms.ToTensor(),
             transforms.Normalize(NORMALIZE_MEAN, NORMALIZE_STD),
         ])
+    
+    # CLIP Model Setup    
     elif model_type == 'clip':
         print("Setting up CLIP with safetensors...")
         model = CLIPModel.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True)
@@ -65,7 +70,7 @@ def setup_model_and_transform(model_type='swin'):
 
 #-------------------------- Feature Extraction Logic -----------------------------#
 
-# Modified to handle both models
+# Extract features from a batch of images
 def extract_features_batch(image_paths, model, transform, model_type='swin'):
     batch = [transform(Image.open(img_path).convert('RGB')) for img_path in image_paths]
     batch = torch.stack(batch)
@@ -81,7 +86,7 @@ def extract_features_batch(image_paths, model, transform, model_type='swin'):
     return features
 
 
-# Modified to include model_type
+# Extract features in parallel
 def extract_features_parallel(image_paths, model, transform, model_type='swin', batch_size=BATCH_SIZE):
     all_features = []
     
@@ -92,28 +97,24 @@ def extract_features_parallel(image_paths, model, transform, model_type='swin', 
             all_features.extend(batch_features)
     return all_features
 
-# Save and load features - modified to include model type in filename
-def save_features(features, filenames, features_file, model_type):
-    base, ext = os.path.splitext(features_file)
-    model_specific_file = f"{base}_{model_type}{ext}"
-    with open(model_specific_file, 'wb') as f:
+# Save features
+def save_features(features, filenames, features_file):
+    with open(features_file, 'wb') as f:
         pickle.dump((features, filenames), f)
-    return model_specific_file
+    return features_file
 
+# Load features
 def load_features(features_file, model_type):
-    base, ext = os.path.splitext(features_file)
-    model_specific_file = f"{base}_{model_type}{ext}"
-    with open(model_specific_file, 'rb') as f:
+    with open(features_file, 'rb') as f:
         return pickle.load(f)
 
-# Modified to include model_type
+# Update features and filenames in the pickle file if new images are added
 def update_features(dataset_folder, features_file, model, transform, model_type='swin'):
     image_list = os.listdir(dataset_folder)
     valid_extensions = ('.png', '.jpg', '.jpeg', '.jfif')
     dataset_filenames = [os.path.join(dataset_folder, img) for img in image_list if img.lower().endswith(valid_extensions)]
 
-    model_specific_file = features_file
-    if os.path.exists(model_specific_file):
+    if os.path.exists(features_file):
         existing_features, existing_filenames = load_features(features_file, model_type)
         new_image_paths = [img for img in dataset_filenames if img not in existing_filenames]
         
@@ -123,14 +124,14 @@ def update_features(dataset_folder, features_file, model, transform, model_type=
             updated_features = existing_features + new_features
             updated_filenames = existing_filenames + new_image_paths
             
-            save_features(updated_features, updated_filenames, features_file, model_type)
+            save_features(updated_features, updated_filenames, features_file)
             return updated_features, updated_filenames
         
         return existing_features, existing_filenames
     else:
         print(f"Extracting features for {len(dataset_filenames)} images...")
         features = extract_features_parallel(dataset_filenames, model, transform, model_type)
-        save_features(features, dataset_filenames, features_file, model_type)
+        save_features(features, dataset_filenames, features_file)
         return features, dataset_filenames
 
 #-------------------------- Similarity Calculations Logic -----------------------------#
@@ -280,6 +281,10 @@ def create_gui(root):
                 root.after(0, lambda: handle_result(result))
             
             threading.Thread(target=run_process, daemon=True).start()
+            
+    def get_model_type(model_type_var):
+        global model_type
+        model_type = model_type_var.get().strip()   
     
     # Modified to update model type
     def get_dataset_folder(dataset_folder_entry):
@@ -288,7 +293,7 @@ def create_gui(root):
         
         if dataset_folder:
             folder_name = os.path.basename(os.path.normpath(dataset_folder))
-            features_file = f'{folder_name}_dataset_features.pkl'
+            features_file = f'{folder_name}_dataset_features_{model_type}.pkl'
             dataset_folder_entry.delete(0, tk.END)
             dataset_folder_entry.insert(0, dataset_folder)
             
@@ -308,7 +313,7 @@ def create_gui(root):
             
             similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.12
             num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
-            current_model_type = model_type_var.get()
+            current_model_type = model_type_entry.get()
             
             model, transform = setup_model_and_transform(current_model_type)
             similar_images = find_similar_images(input_image_path, dataset_folder_path, features_file,
@@ -333,7 +338,7 @@ def create_gui(root):
             
             min_cluster_size = int(min_num_images_per_cluster.get()) if min_num_images_per_cluster.get().isdigit() else 5
             max_clusters = int(max_num_clusters.get()) if max_num_clusters.get().isdigit() else 3
-            current_model_type = model_type_var.get()
+            current_model_type = model_type_entry.get()
             
             model, transform = setup_model_and_transform(current_model_type)
             global clusters, current_cluster_index
@@ -372,8 +377,9 @@ def create_gui(root):
     
     # Model selection
     tk.Label(root, text="Model Type:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
-    model_type_var = tk.StringVar(value="swin")
-    model_select = ttk.Combobox(root, textvariable=model_type_var, values=["swin", "clip"], state="readonly")
+    model_type_entry = tk.StringVar(value="swin")
+    model_select = ttk.Combobox(root, textvariable=model_type_entry, values=["swin", "clip"], state="readonly")
+    model_type_entry.trace_add("write", lambda *args: get_model_type(model_type_entry))  # Using trace_add instead of trace
     model_select.grid(row=0, column=1, padx=10, pady=10)
     
     # Dataset folder selection
