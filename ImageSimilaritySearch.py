@@ -176,10 +176,8 @@ def find_similar_images(query, dataset_folder, features_file, model, transform, 
     if not filtered_similarities:
         return []
     
-    # For image search, we add 1 to top_k to account for the input image
-    effective_top_k = top_k + 1 if not isinstance(query, str) else top_k
-    sorted_indices = np.argsort(filtered_similarities)[-effective_top_k:][::-1]
-    
+    # Sort and return top-k
+    sorted_indices = np.argsort(filtered_similarities)[-top_k:][::-1]
     return [(filenames[filtered_indices[idx]], filtered_similarities[idx]) for idx in sorted_indices]
 
 # Cluster similar images
