@@ -58,12 +58,8 @@ def setup_model_and_transform(model_type):
         print("Setting up CLIP Model...")
         model = CLIPModel.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True)
         clip_processor = CLIPProcessor.from_pretrained(CLIP_VIT_MODEL_NAME)
-        
-        def hf_preprocess(img):
-            return clip_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+        transform = lambda img: clip_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
 
-        transform = hf_preprocess
-    
     model.eval()
     model = model.float()
     
@@ -77,15 +73,10 @@ def extract_features_batch(image_paths, model, transform, model_type):
     batch = torch.stack(batch)
     
     with torch.no_grad():
-        if model_type == 'swin':
-            features = model(batch)
-        else:  # clip
-            features = model.get_image_features(batch)
-        
+        features = model(batch) if model_type == 'swin' else model.get_image_features(batch)
         features = F.normalize(features, p=2, dim=1)
         features = features.cpu().numpy()
     return features
-
 
 # Extract features in parallel
 def extract_features_parallel(image_paths, model, transform, model_type, batch_size=BATCH_SIZE):
@@ -475,17 +466,17 @@ def create_gui(root):
 
     # Action buttons
     action_frame = tk.Frame(root)
-    action_frame.grid(row=8, column=0, columnspan=3, padx=20, pady=10)
+    action_frame.grid(row=9, column=1, padx=20, pady=10)
 
-    tk.Button(action_frame, text="Find Similar Images", command=get_and_plot_similar_images).pack(side=tk.LEFT, padx=5)
-    tk.Button(action_frame, text="Cluster Images", command=get_and_plot_image_clusters).pack(side=tk.LEFT, padx=5)
+    tk.Button(action_frame, text="Find Similar Images", command=get_and_plot_similar_images).grid(row=0, column=0, padx=10)
+    tk.Button(action_frame, text="Cluster Images", command=get_and_plot_image_clusters).grid(row=0, column=1, padx=10)
 
     # Navigation buttons
     nav_frame = tk.Frame(root)
-    nav_frame.grid(row=9, column=0, columnspan=3, padx=20, pady=10)
+    nav_frame.grid(row=10, column=1, padx=20, pady=10)
 
-    tk.Button(nav_frame, text="Previous Cluster", command=previous_cluster).pack(side=tk.LEFT, padx=5)
-    tk.Button(nav_frame, text="Next Cluster", command=next_cluster).pack(side=tk.LEFT, padx=5)
+    tk.Button(nav_frame, text="Previous Cluster", command=previous_cluster).grid(row=0, column=0, padx=10)
+    tk.Button(nav_frame, text="Next Cluster", command=next_cluster).grid(row=0, column=1, padx=10)
 
 if __name__ == "__main__":
     root = tk.Tk()
