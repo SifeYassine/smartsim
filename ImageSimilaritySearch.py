@@ -36,7 +36,7 @@ clip_processor = None
 
 #-------------------------- Setup Logic -----------------------------#
 
-# Load a pre-trained Swin Transformer model and set to evaluation mode
+# Load a pre-trained models and set to evaluation mode
 def setup_model_and_transform(model_type):
     global model, transform, clip_processor
     
@@ -137,59 +137,49 @@ def update_features(dataset_folder, features_file, model, transform, model_type)
 
 #-------------------------- Similarity Calculations Logic -----------------------------#
 
-# Find similar images for a text prompt
-def find_similar_images_by_text(prompt, dataset_folder, features_file, model, transform, top_k, similarity_threshold):
-    # Get text features
-    inputs = clip_processor(text=[prompt], return_tensors="pt", padding=True)
-    with torch.no_grad():
-        text_features = model.get_text_features(**inputs)
-        text_features = F.normalize(text_features, p=2, dim=1)
-    text_features = text_features.cpu().numpy()
+# Find similar images based for either a text prompt or an input image
+def find_similar_images(query, dataset_folder, features_file, model, transform, top_k, similarity_threshold, model_type):
+    # Get query features
+    if isinstance(query, str):            
+        # Process text query
+        inputs = clip_processor(text=[query], return_tensors="pt", padding=True)
+        with torch.no_grad():
+            query_features = model.get_text_features(**inputs)
+            query_features = F.normalize(query_features, p=2, dim=1)
+    else:
+        # Process image query
+        image_to_transform = Image.open(query).convert('RGB')
+        input_tensor = transform(image_to_transform).unsqueeze(0)
+        
+        with torch.no_grad():
+            if model_type == 'swin':
+                query_features = model(input_tensor)
+            else:  # clip
+                query_features = model.get_image_features(input_tensor)
+            query_features = F.normalize(query_features, p=2, dim=1)
+    
+    # Convert to numpy
+    query_features = query_features.cpu().numpy()
+    query_features_reshaped = query_features.reshape(1, -1)
     
     # Get dataset features
-    dataset_features, filenames = update_features(dataset_folder, features_file, model, transform, 'clip')
-    dataset_features_reshaped = np.array(dataset_features).reshape(len(dataset_features), -1)
-    
-    # Calculate similarities
-    similarities = cosine_similarity(text_features, dataset_features_reshaped)[0]
-    
-    # Filter by threshold
-    filtered_indices = [i for i, sim in enumerate(similarities) if sim >= similarity_threshold]
-    filtered_similarities = [similarities[i] for i in filtered_indices]
-    
-    if not filtered_similarities:
-        return []
-    
-    # Sort and return top-k
-    sorted_indices = np.argsort(filtered_similarities)[-top_k:][::-1]
-    return [(filenames[filtered_indices[idx]], filtered_similarities[idx]) for idx in sorted_indices]
-
-# Find similar images for an input image
-def find_similar_images(input_image_path, dataset_folder, features_file, model, transform, top_k, similarity_threshold, model_type):
-    image_to_transform = Image.open(input_image_path).convert('RGB')
-    input_tensor = transform(image_to_transform).unsqueeze(0)
-    
-    with torch.no_grad():
-        if model_type == 'swin':
-            input_features = model(input_tensor)
-        else:  # clip
-            input_features = model.get_image_features(input_tensor)
-        
-        input_features = F.normalize(input_features, p=2, dim=1)
-        input_features = input_features.cpu().numpy()
-
-    input_features_reshaped = input_features.reshape(1, -1)
     dataset_features, filenames = update_features(dataset_folder, features_file, model, transform, model_type)
     dataset_features_reshaped = np.array(dataset_features).reshape(len(dataset_features), -1)
     
-    similarities = cosine_similarity(input_features_reshaped, dataset_features_reshaped)[0]
+    # Calculate similarities
+    similarities = cosine_similarity(query_features_reshaped, dataset_features_reshaped)[0]
+    
+    # Filter by threshold and get top-k results
     filtered_indices = [i for i, sim in enumerate(similarities) if sim >= similarity_threshold]
     filtered_similarities = [similarities[i] for i in filtered_indices]
     
     if not filtered_similarities:
         return []
     
-    sorted_indices = np.argsort(filtered_similarities)[-top_k-1:][::-1]
+    # For image search, we add 1 to top_k to account for the input image
+    effective_top_k = top_k + 1 if not isinstance(query, str) else top_k
+    sorted_indices = np.argsort(filtered_similarities)[-effective_top_k:][::-1]
+    
     return [(filenames[filtered_indices[idx]], filtered_similarities[idx]) for idx in sorted_indices]
 
 # Cluster similar images
@@ -346,10 +336,11 @@ def create_gui(root):
             dataset_folder_path = dataset_folder.get().strip()
             similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.12
             num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
+            current_model_type = model_type_entry.get()
             
             # Setup CLIP model and search
             model, transform = setup_model_and_transform('clip')
-            similar_images = find_similar_images_by_text(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold)
+            similar_images = find_similar_images(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
             
             # Update GUI with results
             def update_gui():
