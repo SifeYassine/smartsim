@@ -31,7 +31,7 @@ current_cluster_index = 0
 clusters = None
 model = None
 transform = None
-model_type = 'swin'
+model_type = None
 clip_processor = None
 
 #-------------------------- Setup Logic -----------------------------#
@@ -153,12 +153,12 @@ def find_similar_images(query, dataset_folder, features_file, model, transform, 
     query_features = query_features.cpu().numpy()
     query_features_reshaped = query_features.reshape(1, -1)
     
-    # Get dataset features
+    # Get dataset features and reshape
     dataset_features, filenames = update_features(dataset_folder, features_file, model, transform, model_type)
     dataset_features_reshaped = np.array(dataset_features).reshape(len(dataset_features), -1)
     
     # Calculate similarities
-    similarities = cosine_similarity(query_features_reshaped, dataset_features_reshaped)[0]
+    similarities = cosine_similarity(text_features_reshaped, dataset_features_reshaped)[0]
     
     # Filter by threshold and get top-k results
     filtered_indices = [i for i, sim in enumerate(similarities) if sim >= similarity_threshold]
@@ -169,6 +169,34 @@ def find_similar_images(query, dataset_folder, features_file, model, transform, 
     
     # Sort and return top-k
     sorted_indices = np.argsort(filtered_similarities)[-top_k:][::-1]
+    return [(filenames[filtered_indices[idx]], filtered_similarities[idx]) for idx in sorted_indices]
+
+# Find similar images for an input image
+def find_similar_images(input_image_path, dataset_folder, features_file, model, transform, top_k, similarity_threshold, model_type):
+    
+    # convert to RGB, transform, and get tensor from input image
+    image_to_transform = Image.open(input_image_path).convert('RGB')
+    input_tensor = transform(image_to_transform).unsqueeze(0)
+    
+    with torch.no_grad():
+        input_features = model(input_tensor) if model_type == 'swin' else model.get_image_features(input_tensor)
+        input_features = F.normalize(input_features, p=2, dim=1)
+        
+    input_features = input_features.cpu().numpy()
+    input_features_reshaped = input_features.reshape(1, -1)
+    
+    dataset_features, filenames = update_features(dataset_folder, features_file, model, transform, model_type)
+    dataset_features_reshaped = np.array(dataset_features).reshape(len(dataset_features), -1)
+    
+    similarities = cosine_similarity(input_features_reshaped, dataset_features_reshaped)[0]
+    
+    filtered_indices = [i for i, sim in enumerate(similarities) if sim >= similarity_threshold]
+    filtered_similarities = [similarities[i] for i in filtered_indices]
+    
+    if not filtered_similarities:
+        return []
+    
+    sorted_indices = np.argsort(filtered_similarities)[-top_k-1:][::-1]
     return [(filenames[filtered_indices[idx]], filtered_similarities[idx]) for idx in sorted_indices]
 
 # Cluster similar images
@@ -277,19 +305,13 @@ def create_gui(root):
     root.title("Image Similarity & Clustering")
     root.geometry("630x500")
     
+    # Plot the figure
     def plot_the_figure(plot_function):
         if plot_function is None:
             return
 
         plot_function()
         plt.show()
-
-    def process_with_progress(process_function, handle_result, *args):            
-            def run_process():
-                result = process_function(*args)
-                root.after(0, lambda: handle_result(result))
-            
-            threading.Thread(target=run_process, daemon=True).start()
     
     # Get model type        
     def get_model_type(model_type_var):
@@ -320,16 +342,20 @@ def create_gui(root):
     # Text search function
     def search_by_text():
         def run_text_search():
-            # Get search parameters
+            global model_type, features_file
+            
+            # Get model, dataset folder and input image
+            current_model_type = model_type
             prompt = text_search.get().strip()
             dataset_folder_path = dataset_folder.get().strip()
+            
+            # Get similarity threshold and number of similar images
             similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.12
             num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
-            current_model_type = model_type_entry.get()
             
-            # Setup CLIP model and search
-            model, transform = setup_model_and_transform('clip')
-            similar_images = find_similar_images(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
+            # Get model and run text search
+            model, transform = setup_model_and_transform(current_model_type)
+            similar_images = find_similar_images_by_text(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
             
             # Update GUI with results
             def update_gui():
@@ -346,14 +372,16 @@ def create_gui(root):
     # Get and plot similar images
     def get_and_plot_similar_images():
         def run_similarity():
-            # Get dataset folder and input image
+            global model_type, features_file
+            
+            # Get moel, dataset folder and input image
+            current_model_type = model_type
             input_image_path = input_image.get().strip()
             dataset_folder_path = dataset_folder.get().strip()
             
             # Get similarity threshold and number of similar images
             similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.12
             num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
-            current_model_type = model_type_entry.get()
             
             # Get model and run similarity
             model, transform = setup_model_and_transform(current_model_type)
@@ -420,9 +448,9 @@ def create_gui(root):
     
     # Model selection
     tk.Label(root, text="Model Type:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
-    model_type_entry = tk.StringVar(value="swin")
+    model_type_entry = tk.StringVar(root)
     model_select = ttk.Combobox(root, textvariable=model_type_entry, values=["swin", "clip"], state="readonly")
-    model_type_entry.trace_add("write", lambda *args: get_model_type(model_type_entry))  # Using trace_add instead of trace
+    model_type_entry.trace_add("write", lambda *args: get_model_type(model_type_entry))
     model_select.grid(row=0, column=1, padx=10, pady=10)
     
     # Dataset folder selection
@@ -446,22 +474,18 @@ def create_gui(root):
     # Rest of the GUI elements (adjusted row numbers)
     tk.Label(root, text="Similarity Threshold:").grid(row=4, column=0, padx=10, pady=10, sticky="e")
     threshold = tk.Entry(root)
-    threshold.insert(0, "0.12")
     threshold.grid(row=4, column=1, padx=10, pady=10)
 
     tk.Label(root, text="Number of Similar Images:").grid(row=5, column=0, padx=10, pady=10, sticky="e")
     top_k = tk.Entry(root)
-    top_k.insert(0, "5")
     top_k.grid(row=5, column=1, padx=10, pady=10)
 
     tk.Label(root, text="Min Images per Cluster:").grid(row=6, column=0, padx=10, pady=10, sticky="e")
     min_num_images_per_cluster = tk.Entry(root)
-    min_num_images_per_cluster.insert(0, "5")
     min_num_images_per_cluster.grid(row=6, column=1, padx=10, pady=10)
 
     tk.Label(root, text="Max Number of Clusters:").grid(row=7, column=0, padx=10, pady=10, sticky="e")
     max_num_clusters = tk.Entry(root)
-    max_num_clusters.insert(0, "3")
     max_num_clusters.grid(row=7, column=1, padx=10, pady=10)
 
     # Action buttons

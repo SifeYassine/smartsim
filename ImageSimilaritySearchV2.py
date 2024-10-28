@@ -264,13 +264,6 @@ def create_gui(root):
 
         plot_function()
         plt.show()
-
-    def process_with_progress(process_function, handle_result, *args):            
-            def run_process():
-                result = process_function(*args)
-                root.after(0, lambda: handle_result(result))
-            
-            threading.Thread(target=run_process, daemon=True).start()
     
     # Get model type        
     def get_model_type(model_type_var):
