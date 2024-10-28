@@ -98,7 +98,8 @@ def save_features(features, filenames, features_file):
 # Load features
 def load_features(features_file, model_type):
     with open(features_file, 'rb') as f:
-        return pickle.load(f)
+        features_file = pickle.load(f)
+    return features_file    
 
 # Update features and filenames in the pickle file if new images are added
 def update_features(dataset_folder, features_file, model, transform, model_type):
