@@ -39,7 +39,7 @@ clip_processor = None
 # Load a pre-trained models and set to evaluation mode
 def setup_model_and_transform(model_type):
     global model, transform, clip_processor
-    
+
     # Swin Model Setup
     if model_type == 'swin':
         print("Setting up Swin Model...")
@@ -71,7 +71,7 @@ def setup_model_and_transform(model_type):
 def extract_features_batch(image_paths, model, transform, model_type):
     batch = [transform(Image.open(img_path).convert('RGB')) for img_path in image_paths]
     batch = torch.stack(batch)
-    
+
     with torch.no_grad():
         features = model(batch) if model_type == 'swin' else model.get_image_features(batch)
         features = F.normalize(features, p=2, dim=1)
@@ -109,7 +109,7 @@ def update_features(dataset_folder, features_file, model, transform, model_type)
     if os.path.exists(features_file):
         existing_features, existing_filenames = load_features(features_file, model_type)
         new_image_paths = [img for img in dataset_filenames if img not in existing_filenames]
-        
+
         if new_image_paths:
             print(f"Found {len(new_image_paths)} new images. Updating features...")
             new_features = extract_features_parallel(new_image_paths, model, transform, model_type)
@@ -355,6 +355,7 @@ def create_gui(root):
             
             # Get model and run text search
             model, transform = setup_model_and_transform(current_model_type)
+            
             similar_images = find_similar_images_by_text(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
             
             # Update GUI with results
@@ -380,7 +381,7 @@ def create_gui(root):
             dataset_folder_path = dataset_folder.get().strip()
             
             # Get similarity threshold and number of similar images
-            similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.12
+            similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.2
             num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
             
             # Get model and run similarity
@@ -459,27 +460,29 @@ def create_gui(root):
     dataset_folder.grid(row=1, column=1, padx=10, pady=10)
     tk.Button(root, text="Browse", command=lambda: get_dataset_folder(dataset_folder)).grid(row=1, column=2, padx=10, pady=10)
 
-    # Text search input (new)
+    # Text search input
     tk.Label(root, text="Text Search:").grid(row=2, column=0, padx=10, pady=10, sticky="e")
     text_search = tk.Entry(root, width=40)
     text_search.grid(row=2, column=1, padx=10, pady=10)
     tk.Button(root, text="Search by Text", command=search_by_text).grid(row=2, column=2, padx=10, pady=10)
     
-    # Input image selection (moved to row 3)
+    # Input image selection
     tk.Label(root, text="Input Image:").grid(row=3, column=0, padx=10, pady=10, sticky="e")
     input_image = tk.Entry(root, width=40)
     input_image.grid(row=3, column=1, padx=10, pady=10)
     tk.Button(root, text="Browse", command=lambda: get_image_path(input_image)).grid(row=3, column=2, padx=10, pady=10)
     
-    # Rest of the GUI elements (adjusted row numbers)
+    # Similarity threshold
     tk.Label(root, text="Similarity Threshold:").grid(row=4, column=0, padx=10, pady=10, sticky="e")
     threshold = tk.Entry(root)
     threshold.grid(row=4, column=1, padx=10, pady=10)
 
+    # Number of similar images (top_k)
     tk.Label(root, text="Number of Similar Images:").grid(row=5, column=0, padx=10, pady=10, sticky="e")
     top_k = tk.Entry(root)
     top_k.grid(row=5, column=1, padx=10, pady=10)
 
+    # Max Number of Clusters
     tk.Label(root, text="Min Images per Cluster:").grid(row=6, column=0, padx=10, pady=10, sticky="e")
     min_num_images_per_cluster = tk.Entry(root)
     min_num_images_per_cluster.grid(row=6, column=1, padx=10, pady=10)

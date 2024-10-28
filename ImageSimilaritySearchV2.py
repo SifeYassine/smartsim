@@ -31,7 +31,7 @@ current_cluster_index = 0
 clusters = None
 model = None
 transform = None
-model_type = 'swin'
+model_type = None
 clip_processor = None
 isTextSearch = False
 
@@ -56,6 +56,7 @@ def setup_model_and_transform(model_type):
     
     # CLIP Model Setup    
     else:
+        print("Setting up CLIP Model...")
         model = CLIPModel.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True)
         clip_processor = CLIPProcessor.from_pretrained(CLIP_VIT_MODEL_NAME)
         transform = lambda img: clip_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
@@ -74,7 +75,8 @@ def extract_features_batch(image_paths, model, transform, model_type):
 
     with torch.no_grad():
         features = model(batch) if model_type == 'swin' else model.get_image_features(batch)
-        features = F.normalize(features, p=2, dim=1).cpu().numpy()
+        features = F.normalize(features, p=2, dim=1)
+        features = features.cpu().numpy()
     return features
 
 # Extract features in parallel
@@ -82,7 +84,7 @@ def extract_features_parallel(image_paths, model, transform, model_type, batch_s
     all_features = []
     
     with ThreadPoolExecutor() as executor:
-        for i in tqdm(range(0, len(image_paths), BATCH_SIZE), desc="Extracting features"):
+        for i in tqdm(range(0, len(image_paths), batch_size), desc="Extracting features"):
             batch_paths = image_paths[i:i + batch_size]
             batch_features = executor.submit(extract_features_batch, batch_paths, model, transform, model_type).result()
             all_features.extend(batch_features)
@@ -92,10 +94,10 @@ def extract_features_parallel(image_paths, model, transform, model_type, batch_s
 def save_features(features, filenames, features_file):
     with open(features_file, 'wb') as f:
         pickle.dump((features, filenames), f)
-    return features_file    
+    return features_file
 
 # Load features
-def load_features(features_file):
+def load_features(features_file, model_type):
     with open(features_file, 'rb') as f:
         return pickle.load(f)
 
@@ -106,7 +108,7 @@ def update_features(dataset_folder, features_file, model, transform, model_type)
     dataset_filenames = [os.path.join(dataset_folder, img) for img in image_list if img.lower().endswith(valid_extensions)]
 
     if os.path.exists(features_file):
-        existing_features, existing_filenames = load_features(features_file)
+        existing_features, existing_filenames = load_features(features_file, model_type)
         new_image_paths = [img for img in dataset_filenames if img not in existing_filenames]
 
         if new_image_paths:
@@ -130,23 +132,19 @@ def update_features(dataset_folder, features_file, model, transform, model_type)
 # Find similar images for either a text prompt or an input image
 def find_similar_images(query, dataset_folder, features_file, model, transform, top_k, similarity_threshold, model_type):
     # Get query features
-    if isTextSearch:            
+    if isTextSearch and model_type == 'clip':            
         # Process text query using CLIP
-        if model_type == 'clip':
-            inputs = clip_processor(text=[query], return_tensors="pt", padding=True)
-            with torch.no_grad():
-                query_features = model.get_text_features(**inputs)
-        else:
-            print("Text queries are only supported with CLIP model.")
-            return []
+        inputs = clip_processor(text=[query], return_tensors="pt", padding=True)
+        with torch.no_grad():
+            query_features = model.get_text_features(**inputs)
+
     else:
         # Process image query
         image_to_transform = Image.open(query).convert('RGB')
         input_tensor = transform(image_to_transform).unsqueeze(0)
         
         with torch.no_grad():
-            query_features = model(input_tensor) if model_type == 'swin' else model.get_image_features(input_tensor)
-            
+            query_features = model(input_tensor) if model_type == 'swin' else model.get_image_features(input_tensor)        
     
     # L2 normalization, convert to numpy and reshape
     query_features = F.normalize(query_features, p=2, dim=1)
@@ -256,8 +254,9 @@ def plot_image_clusters(clusters, cluster_index=0):
 
 def create_gui(root):
     root.title("Image Similarity & Clustering")
-    root.geometry("800x550")
+    root.geometry("800x450")
     
+    # Plot the figure
     def plot_the_figure(plot_function):
         if plot_function is None:
             return
@@ -294,17 +293,22 @@ def create_gui(root):
     # Text search function
     def search_by_text():
         def run_text_search():
-            global isTextSearch
-            # Get search parameters
+            global model_type, features_file, isTextSearch
+            
+            # Get model, dataset folder and input image
+            current_model_type = model_type
+            print(f"Current model type: {current_model_type}")
+            dataset_folder_path = dataset_folder.get().strip()
             prompt = text_search.get().strip()
             isTextSearch = True
-            dataset_folder_path = dataset_folder.get().strip()
+            
+            # Get similarity threshold and number of similar images
             similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.12
             num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
-            current_model_type = model_type_entry.get()
             
-            # Setup CLIP model and search
-            model, transform = setup_model_and_transform('clip')
+            # Get model and run text search
+            model, transform = setup_model_and_transform(current_model_type)
+            
             similar_images = find_similar_images(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
             
             # Update GUI with results
@@ -322,14 +326,16 @@ def create_gui(root):
     # Get and plot similar images
     def get_and_plot_similar_images():
         def run_similarity():
-            # Get dataset folder and input image
+            global model_type, features_file
+            
+            # Get moel, dataset folder and input image
+            current_model_type = model_type
             input_image_path = input_image.get().strip()
             dataset_folder_path = dataset_folder.get().strip()
             
             # Get similarity threshold and number of similar images
             similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.2
             num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
-            current_model_type = model_type_entry.get()
             
             # Get model and run similarity
             model, transform = setup_model_and_transform(current_model_type)
@@ -396,7 +402,7 @@ def create_gui(root):
     
     # Model selection
     tk.Label(root, text="Model Type:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
-    model_type_entry = tk.StringVar(value="swin")
+    model_type_entry = tk.StringVar(root)
     model_select = ttk.Combobox(root, textvariable=model_type_entry, values=["swin", "clip"], state="readonly")
     model_type_entry.trace_add("write", lambda *args: get_model_type(model_type_entry))
     model_select.grid(row=0, column=1, padx=10, pady=10)
