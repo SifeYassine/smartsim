@@ -290,7 +290,7 @@ def create_gui(root):
         if input_image:
             input_image_entry.delete(0, tk.END)
             input_image_entry.insert(0, input_image)
-            
+
     # Text search function
     def search_by_text():
         def run_text_search():
@@ -312,7 +312,7 @@ def create_gui(root):
             
             similar_images = find_similar_images(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
             
-            # Update GUI with results
+          # Update GUI with results
             def update_gui():
                 if similar_images:
                     plot_function = plot_similar_images(similar_images)
@@ -322,14 +322,14 @@ def create_gui(root):
             
             root.after(0, update_gui)
         
-        threading.Thread(target=run_text_search, daemon=True).start()        
+        threading.Thread(target=run_text_search, daemon=True).start()
     
     # Get and plot similar images
     def get_and_plot_similar_images():
         def run_similarity():
             global model_type, features_file
             
-            # Get moel, dataset folder and input image
+            # Get model, dataset folder and input image
             current_model_type = model_type
             input_image_path = input_image.get().strip()
             dataset_folder_path = dataset_folder.get().strip()
