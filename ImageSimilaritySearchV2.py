@@ -6,7 +6,8 @@ import os
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import AgglomerativeClustering
-import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
 from timm import create_model
 from transformers import CLIPProcessor, CLIPModel
 import pickle
@@ -25,6 +26,11 @@ CLIP_VIT_MODEL_NAME = 'openai/clip-vit-base-patch32'
 NORMALIZE_MEAN = (0.485, 0.456, 0.406)
 NORMALIZE_STD = (0.229, 0.224, 0.225)
 
+# Image display constants
+IMAGES_PER_ROW = 4
+IMAGE_DISPLAY_SIZE = (2.5, 2.5)  # Fixed size in inches for each image subplot
+MAX_VISIBLE_ROWS = 3  # Maximum rows visible without scrolling
+
 # Global variables
 features_file = None
 current_cluster_index = 0
@@ -34,6 +40,11 @@ transform = None
 model_type = None
 clip_processor = None
 isTextSearch = False
+current_plot_window = None
+current_canvas = None
+current_scrollable_frame = None
+current_figure = None
+current_canvas_widget = None
 
 #-------------------------- Setup Logic -----------------------------#
 
@@ -57,8 +68,8 @@ def setup_model_and_transform(model_type):
     # CLIP Model Setup    
     else:
         print("Setting up CLIP Model...")
-        model = CLIPModel.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True)
-        clip_processor = CLIPProcessor.from_pretrained(CLIP_VIT_MODEL_NAME)
+        model = CLIPModel.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True, cache_dir=r'D:\AI Assets\CLIP')
+        clip_processor = CLIPProcessor.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True, cache_dir=r'D:\AI Assets\CLIP')
         transform = lambda img: clip_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
 
     model.eval()
@@ -193,77 +204,167 @@ def cluster_similar_images(dataset_folder, features_file, model, transform, max_
 
     return clusters
 
-#-------------------------- Plotting Logic -----------------------------#
+#-------------------------- Scrollable Plotting Logic -----------------------------#
 
-# Get and plot similar images
-def plot_similar_images(similar_images):
+# Event handler for frame configuration
+def on_frame_configure(event, canvas):
+    canvas.configure(scrollregion=canvas.bbox('all'))
+
+# Event handler for canvas configuration  
+def on_canvas_configure(event, canvas, canvas_window):
+    canvas_width = event.width
+    canvas.itemconfig(canvas_window, width=canvas_width)
+
+# Event handler for mouse wheel scrolling
+def on_mousewheel(event, canvas):
+    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+# Create scrollable plot window and return necessary components
+def create_scrollable_plot_window(title="Image Results"):
+    window = tk.Toplevel()
+    window.title(title)
+    window.geometry("1000x800")
+    
+    # Create main frame
+    main_frame = tk.Frame(window)
+    main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+    # Create canvas and scrollbar
+    canvas = tk.Canvas(main_frame, bg='white')
+    v_scrollbar = tk.Scrollbar(main_frame, orient=tk.VERTICAL, command=canvas.yview)
+    h_scrollbar = tk.Scrollbar(main_frame, orient=tk.HORIZONTAL, command=canvas.xview)
+    
+    # Configure canvas scrolling
+    canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+    
+    # Pack scrollbars and canvas
+    v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    
+    # Create scrollable frame
+    scrollable_frame = tk.Frame(canvas)
+    canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor='nw')
+    
+    # Bind events using lambda to pass additional parameters
+    scrollable_frame.bind('<Configure>', lambda event: on_frame_configure(event, canvas))
+    canvas.bind('<Configure>', lambda event: on_canvas_configure(event, canvas, canvas_window))
+    canvas.bind_all('<MouseWheel>', lambda event: on_mousewheel(event, canvas))
+    
+    return window, canvas, scrollable_frame
+
+# Create matplotlib plot within scrollable frame
+def create_scrollable_plot(canvas, scrollable_frame, images_data, title, is_similarity=False):
+    global current_figure, current_canvas_widget
+    
+    if not images_data:
+        return
+        
+    num_images = len(images_data)
+    num_rows = (num_images + IMAGES_PER_ROW - 1) // IMAGES_PER_ROW
+    
+    # Calculate figure size based on number of images and fixed image size
+    fig_width = IMAGES_PER_ROW * IMAGE_DISPLAY_SIZE[0]
+    fig_height = num_rows * IMAGE_DISPLAY_SIZE[1]
+    
+    # Create matplotlib figure
+    current_figure = Figure(figsize=(fig_width, fig_height), dpi=100)
+    current_figure.suptitle(title, fontsize=14, y=0.98)
+    
+    # Plot images
+    for i, data in enumerate(images_data):
+        if is_similarity:
+            img_path, similarity = data
+            title_text = f'Similarity: {similarity*100:.2f}%'
+        else:
+            img_path = data
+            title_text = os.path.basename(img_path)
+        
+        try:
+            image = Image.open(img_path)
+            ax = current_figure.add_subplot(num_rows, IMAGES_PER_ROW, i + 1)
+            ax.imshow(image)
+            ax.set_title(title_text, fontsize=10, pad=5)
+            ax.axis('off')
+        except Exception as e:
+            print(f"Error loading image {img_path}: {e}")
+    
+    current_figure.tight_layout()
+    
+    # Embed in tkinter
+    if current_canvas_widget:
+        current_canvas_widget.get_tk_widget().destroy()
+        
+    current_canvas_widget = FigureCanvasTkAgg(current_figure, scrollable_frame)
+    current_canvas_widget.draw()
+    current_canvas_widget.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    
+    # Update scroll region
+    scrollable_frame.update_idletasks()
+    canvas.configure(scrollregion=canvas.bbox('all'))
+
+# Update plot within existing scrollable window
+def update_scrollable_plot(images_data, title, is_similarity=False):
+    global current_canvas, current_scrollable_frame
+    
+    if current_canvas and current_scrollable_frame:
+        create_scrollable_plot(current_canvas, current_scrollable_frame, images_data, title, is_similarity)
+
+# Get and plot similar images with scrolling
+def plot_similar_images_scrollable(similar_images):
     if not similar_images:
         return
     
-    # Close previous plot if it exists
-    plt.close()
+    global current_plot_window, current_canvas, current_scrollable_frame
     
-    def plot():
-        num_similar_images = len(similar_images)
-        num_cols = min(num_similar_images, 4)
-        num_rows = (num_similar_images + num_cols - 1) // num_cols
-        
-        plt.figure(figsize=(8, 3 * num_rows))
-        plt.suptitle('Similar Images to Input Image', fontsize=12)
-        
-        for i, (img_path, similarity) in enumerate(similar_images):
-            image = Image.open(img_path)
-            plt.subplot(num_rows, num_cols, i + 1)
-            plt.imshow(image)
-            plt.title(f'Similarity: {similarity*100:.2f}%' if i > 0 else 'Input Image')
-            plt.axis('off')
-        
-        plt.tight_layout()
+    # Close previous window if it exists
+    if current_plot_window and current_plot_window.winfo_exists():
+        current_plot_window.destroy()
     
-    return plot
+    # Create new scrollable plot window
+    current_plot_window, current_canvas, current_scrollable_frame = create_scrollable_plot_window("Similar Images")
+    create_scrollable_plot(current_canvas, current_scrollable_frame, similar_images, "Similar Images to Query", is_similarity=True)
 
-# Get and Plot image clusters
-def plot_image_clusters(clusters, cluster_index=0):
+# Get and Plot image clusters with scrolling
+def plot_image_clusters_scrollable(clusters, cluster_index=0):
     if not clusters:
         return
     
-    # Close previous plot if it exists
-    plt.close()
+    global current_plot_window, current_canvas, current_scrollable_frame
+    
+    # Close previous window if it exists
+    if current_plot_window and current_plot_window.winfo_exists():
+        current_plot_window.destroy()
+    
+    cluster_label = list(clusters.keys())[cluster_index]
+    cluster_images = clusters[cluster_label]
+    
+    title = f"Cluster {cluster_index + 1}/{len(clusters)} ({len(cluster_images)} images)"
+    
+    # Create new scrollable plot window
+    current_plot_window, current_canvas, current_scrollable_frame = create_scrollable_plot_window("Image Clusters")
+    create_scrollable_plot(current_canvas, current_scrollable_frame, cluster_images, title, is_similarity=False)
 
-    def plot():
-        plt.figure(figsize=(8, 6))
-        cluster_label = list(clusters.keys())[cluster_index]
-        cluster_images = clusters[cluster_label]
-        
-        num_images = len(cluster_images)
-        num_cols = min(num_images, 4)
-        num_rows = (num_images + num_cols - 1) // num_cols
+# Update cluster plot within existing window (for navigation)
+def update_cluster_plot(clusters, cluster_index=0):
+    if not clusters:
+        return
+    
+    cluster_label = list(clusters.keys())[cluster_index]
+    cluster_images = clusters[cluster_label]
+    
+    title = f"Cluster {cluster_index + 1}/{len(clusters)} ({len(cluster_images)} images)"
+    
+    # Update plot within existing window
+    update_scrollable_plot(cluster_images, title, is_similarity=False)
 
-        plt.suptitle(f"Cluster {cluster_index + 1}/{len(clusters)}", fontsize=12)
 
-        for j, image_path in enumerate(cluster_images):
-            image = Image.open(image_path)
-            plt.subplot(num_rows, num_cols, j + 1)
-            plt.imshow(image)
-            plt.axis('off')
-
-        plt.tight_layout()
-
-    return plot
 
 #-------------------------- Tkinter GUI -----------------------------#
 
 def create_gui(root):
     root.title("Image Similarity & Clustering")
     root.geometry("800x450")
-    
-    # Plot the figure
-    def plot_the_figure(plot_function):
-        if plot_function is None:
-            return
-
-        plot_function()
-        plt.show()
     
     # Get model type        
     def get_model_type(model_type_var):
@@ -312,11 +413,10 @@ def create_gui(root):
             
             similar_images = find_similar_images(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
             
-          # Update GUI with results
+          # Update GUI with results using scrollable plot
             def update_gui():
                 if similar_images:
-                    plot_function = plot_similar_images(similar_images)
-                    plot_the_figure(plot_function)
+                    plot_similar_images_scrollable(similar_images)
                 else:
                     messagebox.showinfo("Info", "No similar images found.")
             
@@ -342,11 +442,10 @@ def create_gui(root):
             model, transform = setup_model_and_transform(current_model_type)
             similar_images = find_similar_images(input_image_path, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
             
-            # Update GUI with results
+            # Update GUI with results using scrollable plot
             def update_gui():
                 if similar_images:
-                    plot_function = plot_similar_images(similar_images)
-                    plot_the_figure(plot_function)
+                    plot_similar_images_scrollable(similar_images)
                 else:
                     messagebox.showinfo("Info", "No similar images found.")
             
@@ -371,11 +470,10 @@ def create_gui(root):
             current_cluster_index = 0
             clusters = cluster_similar_images(dataset_folder_path, features_file, model, transform, max_clusters, similarity_threshold, current_model_type)
             
-            # Update GUI with results
+            # Update GUI with results using scrollable plot
             def update_gui():
                 if clusters:
-                    plot_function = plot_image_clusters(clusters, cluster_index=0)
-                    plot_the_figure(plot_function)
+                    plot_image_clusters_scrollable(clusters, cluster_index=0)
                 else:
                     messagebox.showinfo("Info", "No image clusters found.")
             
@@ -388,16 +486,14 @@ def create_gui(root):
         global current_cluster_index
         if clusters and current_cluster_index < len(clusters) - 1:
             current_cluster_index += 1
-            plot_function = plot_image_clusters(clusters, cluster_index=current_cluster_index)
-            plot_the_figure(plot_function)
+            update_cluster_plot(clusters, cluster_index=current_cluster_index)
     
     # Get previous cluster when "Previous Cluster" button is clicked
     def previous_cluster():
         global current_cluster_index
         if clusters and current_cluster_index > 0:
             current_cluster_index -= 1
-            plot_function = plot_image_clusters(clusters, cluster_index=current_cluster_index)
-            plot_the_figure(plot_function)
+            update_cluster_plot(clusters, cluster_index=current_cluster_index)
     
     #-------------------------- GUI Layout ------------------------------#
     

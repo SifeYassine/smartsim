@@ -60,8 +60,8 @@ def setup_model_and_transform(model_type):
     # CLIP Model Setup    
     else:
         print("Setting up CLIP Model...")
-        model = CLIPModel.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True)
-        clip_processor = CLIPProcessor.from_pretrained(CLIP_VIT_MODEL_NAME)
+        model = CLIPModel.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True, cache_dir=r'D:\AI Assets\CLIP')
+        clip_processor = CLIPProcessor.from_pretrained(CLIP_VIT_MODEL_NAME, use_safetensors=True, cache_dir=r'D:\AI Assets\CLIP')
         transform = lambda img: clip_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
 
     model.eval()
