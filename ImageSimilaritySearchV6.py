@@ -6,8 +6,7 @@ import os
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import AgglomerativeClustering
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import cv2
 from timm import create_model
 from transformers import CLIPProcessor, CLIPModel
 import pickle
@@ -16,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 import threading
 
 # Constants
@@ -29,22 +28,31 @@ NORMALIZE_STD = (0.229, 0.224, 0.225)
 
 # Image display constants
 IMAGES_PER_ROW = 4
-IMAGE_DISPLAY_SIZE = (2.5, 2.5)
+IMAGE_DISPLAY_SIZE = (180, 180)
 
 # Global variables
 features_file = None
 current_cluster_index = 0
 current_plot_window = None
-current_canvas = None
 current_scrollable_frame = None
-current_figure = None
-current_canvas_widget = None
+current_image_frame = None
 clusters = None
 model = None
 transform = None
 model_type = None
 clip_processor = None
 isTextSearch = False
+
+# GUI widget references
+dataset_folder_entry = None
+text_search_entry = None
+input_image_entry = None
+threshold_entry = None
+top_k_entry = None
+max_num_clusters_entry = None
+min_images_per_cluster_entry = None
+max_images_per_cluster_entry = None
+root = None
 
 #-------------------------- Setup Logic -----------------------------#
 
@@ -210,131 +218,168 @@ def cluster_similar_images(dataset_folder, features_file, model, transform, max_
         
     return clusters
 
-#-------------------------- Scrollable Plotting Logic -----------------------------#
+#-------------------------- Plotting Logic -----------------------------#
 
-# Event handler for frame configuration
-def on_frame_configure(event, canvas):
-    canvas.configure(scrollregion=canvas.bbox('all'))
+# Fast image loading with OpenCV (aspect ratio preserved)
+def load_image_fast(image_path, size=IMAGE_DISPLAY_SIZE, padding_color=(40, 40, 40)):
+    try:
+        # Load image with OpenCV
+        img = cv2.imread(image_path)
+        if img is None:
+            return None
+        
+        # Get dimensions
+        h, w = img.shape[:2]
+        target_w, target_h = size
+        
+        # Calculate the scale factor to fit the image within target size
+        scale = min(target_w / w, target_h / h)
+        
+        # Calculate new dimensions (maintaining aspect ratio)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        
+        # Resize image with preserved aspect ratio
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-# Event handler for canvas configuration  
-def on_canvas_configure(event, canvas, canvas_window):
-    canvas_width = event.width
-    canvas.itemconfig(canvas_window, width=canvas_width)
+        # Create a canvas with padding color
+        canvas = np.full((target_h, target_w, 3), padding_color, dtype=np.uint8)
+        
+        # Calculate centering offsets
+        y_offset = (target_h - new_h) // 2
+        x_offset = (target_w - new_w) // 2
+        
+        # Place the resized image on the canvas
+        canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
+        
+        # Convert BGR to RGB for PIL
+        img_rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+        
+        # Convert to PIL Image, then CTkImage
+        pil_img = Image.fromarray(img_rgb)
+        return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
+        
+    except Exception as e:
+        print(f"Error loading image {image_path}: {e}")
+        return None
 
-# Event handler for mouse wheel scrolling
-def on_mousewheel(event, canvas):
-    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-# Create scrollable plot window and return necessary components
+# Create scrollable plot window
 def create_scrollable_plot_window(title="Image Results"):
     window = ctk.CTkToplevel()
     window.title(title)
-    window.geometry("1000x800")
+    window.geometry("900x700")
     
     # Create main frame
     main_frame = ctk.CTkFrame(window)
     main_frame.pack(fill="both", expand=True, padx=10, pady=10)
     
-    # Create tkinter canvas and scrollbar (for matplotlib integration)
-    canvas = tk.Canvas(main_frame)
-    scrollbar = ctk.CTkScrollbar(main_frame, orientation="vertical", command=canvas.yview)
-    
-    # Configure canvas scrolling
-    canvas.configure(yscrollcommand=scrollbar.set)
-    
-    # Pack scrollbars and canvas
-    scrollbar.pack(side="right", fill="y")
-    canvas.pack(side="left", fill="both", expand=True)
-    
     # Create scrollable frame
-    scrollable_frame = ctk.CTkFrame(canvas)
-    canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor='nw')
+    scrollable_frame = ctk.CTkScrollableFrame(main_frame, width=950, height=700)
+    scrollable_frame.pack(fill="both", expand=True, padx=5, pady=5)
     
-    # Bind events using lambda to pass additional parameters
-    scrollable_frame.bind('<Configure>', lambda event: on_frame_configure(event, canvas))
-    canvas.bind('<Configure>', lambda event: on_canvas_configure(event, canvas, canvas_window))
-    canvas.bind_all('<MouseWheel>', lambda event: on_mousewheel(event, canvas))
-    
-    return window, canvas, scrollable_frame
+    return window, scrollable_frame
 
-# Create matplotlib plot within scrollable frame
-def create_scrollable_plot(canvas, scrollable_frame, images_data, title, is_similarity=False):
-    global current_figure, current_canvas_widget
+# Create fast image grid using OpenCV + CustomTkinter
+def create_fast_image_grid(scrollable_frame, images_data, title, is_similarity=False):
+    global current_image_frame
+    
+    # Clear existing image frame if it exists
+    if current_image_frame:
+        current_image_frame.destroy()
+    
+    # Create new image frame with CustomTkinter
+    current_image_frame = ctk.CTkFrame(scrollable_frame)
+    current_image_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    
+    # Title label with CustomTkinter
+    title_label = ctk.CTkLabel(
+        current_image_frame, 
+        text=title, 
+        font=ctk.CTkFont(size=16, weight="bold")
+    )
+    title_label.grid(row=0, column=0, columnspan=IMAGES_PER_ROW, pady=(0, 20))
     
     if not images_data:
+        no_images_label = ctk.CTkLabel(
+            current_image_frame,
+            text="No images to display",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        no_images_label.grid(row=1, column=0, columnspan=IMAGES_PER_ROW, pady=20)
         return
-        
-    num_images = len(images_data)
-    num_rows = (num_images + IMAGES_PER_ROW - 1) // IMAGES_PER_ROW
     
-    # Calculate figure size based on number of images and fixed image size
-    fig_width = IMAGES_PER_ROW * IMAGE_DISPLAY_SIZE[0]
-    fig_height = num_rows * IMAGE_DISPLAY_SIZE[1]
-    
-    # Create matplotlib figure
-    current_figure = Figure(figsize=(fig_width, fig_height), dpi=100)
-    current_figure.suptitle(title, fontsize=14, y=0.98)
-    
-    # Plot images
+    # Load and display images in grid
+    loaded_count = 0
     for i, data in enumerate(images_data):
         if is_similarity:
             img_path, similarity = data
-            title_text = f'Similarity: {similarity*100:.2f}%' 
+            title_text = f'Similarity: {similarity*100:.1f}%'
         else:
             img_path = data
-            title_text = os.path.basename(img_path)
+            filename = os.path.basename(img_path)
+            title_text = filename[:25] + "..." if len(filename) > 25 else filename
         
-        try:
-            image = Image.open(img_path)
-            ax = current_figure.add_subplot(num_rows, IMAGES_PER_ROW, i + 1)
-            ax.imshow(image)
-            ax.set_title(title_text, fontsize=10, pad=5)
-            ax.axis('off')
-        except Exception as e:
-            print(f"Error loading image {img_path}: {e}")
-    
-    current_figure.tight_layout()
-    
-    # Embed in tkinter
-    if current_canvas_widget:
-        current_canvas_widget.get_tk_widget().destroy()
+        # Load image
+        photo = load_image_fast(img_path)
+        if photo is None:
+            continue
         
-    current_canvas_widget = FigureCanvasTkAgg(current_figure, scrollable_frame)
-    current_canvas_widget.draw()
-    current_canvas_widget.get_tk_widget().pack(fill="both", expand=True)
+        # Calculate grid position
+        row = (loaded_count // IMAGES_PER_ROW) + 1
+        col = loaded_count % IMAGES_PER_ROW
+        
+        # Create frame for image and label
+        img_container = ctk.CTkFrame(
+            current_image_frame, 
+            border_width=0, 
+            corner_radius=0,
+            fg_color="transparent"
+        )
+        img_container.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
+        
+        # Image label
+        img_label = ctk.CTkLabel(img_container, image=photo, text="")
+        img_label.pack()
+        
+        # Title label
+        text_label = ctk.CTkLabel(
+            img_container, 
+            text=title_text, 
+            font=ctk.CTkFont(size=9),
+            text_color='white',
+            wraplength=IMAGE_DISPLAY_SIZE[0],
+            justify='center'
+        )
+        text_label.pack(pady=(2, 0))
+        
+        loaded_count += 1
     
-    # Update scroll region
-    scrollable_frame.update_idletasks()
-    canvas.configure(scrollregion=canvas.bbox('all'))
-
-# Update plot within existing scrollable window
-def update_scrollable_plot(images_data, title, is_similarity=False):
-    global current_canvas, current_scrollable_frame
-    
-    if current_canvas and current_scrollable_frame:
-        create_scrollable_plot(current_canvas, current_scrollable_frame, images_data, title, is_similarity)
+    # Configure grid weights for responsive layout
+    for i in range(IMAGES_PER_ROW):
+        current_image_frame.grid_columnconfigure(i, weight=1)
 
 # Plot similar images in a scrollable window
 def plot_similar_images_scrollable(similar_images):
     if not similar_images:
         return
     
-    global current_plot_window, current_canvas, current_scrollable_frame
+    global current_plot_window, current_scrollable_frame
     
     # Close previous window if it exists
     if current_plot_window and current_plot_window.winfo_exists():
         current_plot_window.destroy()
     
     # Create new scrollable plot window
-    current_plot_window, current_canvas, current_scrollable_frame = create_scrollable_plot_window("Similar Images")
-    create_scrollable_plot(current_canvas, current_scrollable_frame, similar_images, "Similar Images to Query", is_similarity=True)
+    current_plot_window, current_scrollable_frame = create_scrollable_plot_window("Similar Images")
+    create_fast_image_grid(current_scrollable_frame, similar_images, f"Similar Images to Query ({len(similar_images)} found)", is_similarity=True)
 
 # Plot image clusters in a scrollable window
 def plot_image_clusters_scrollable(clusters, cluster_index=0):
     if not clusters:
         return
     
-    global current_plot_window, current_canvas, current_scrollable_frame
+    global current_plot_window, current_scrollable_frame
     
     # Close previous window if it exists
     if current_plot_window and current_plot_window.winfo_exists():
@@ -346,12 +391,12 @@ def plot_image_clusters_scrollable(clusters, cluster_index=0):
     title = f"Cluster {cluster_index + 1}/{len(clusters)} ({len(cluster_images)} images)"
     
     # Create new scrollable plot window
-    current_plot_window, current_canvas, current_scrollable_frame = create_scrollable_plot_window("Image Clusters")
-    create_scrollable_plot(current_canvas, current_scrollable_frame, cluster_images, title, is_similarity=False)
+    current_plot_window, current_scrollable_frame = create_scrollable_plot_window("Image Clusters")
+    create_fast_image_grid(current_scrollable_frame, cluster_images, title, is_similarity=False)
 
 # Update cluster plot within existing window (for navigation)
 def update_cluster_plot(clusters, cluster_index=0):
-    if not clusters:
+    if not clusters or not current_scrollable_frame:
         return
     
     cluster_label = list(clusters.keys())[cluster_index]
@@ -360,11 +405,154 @@ def update_cluster_plot(clusters, cluster_index=0):
     title = f"Cluster {cluster_index + 1}/{len(clusters)} ({len(cluster_images)} images)"
     
     # Update plot within existing window
-    update_scrollable_plot(cluster_images, title, is_similarity=False)
+    create_fast_image_grid(current_scrollable_frame, cluster_images, title, is_similarity=False)
 
-#-------------------------- Tkinter GUI -----------------------------#
+#-------------------------- GUI Callback Functions -----------------------------#
 
-def create_gui(root):
+# Get model type
+def get_model_type(choice):
+    global model_type
+    model_type = choice
+
+# Get dataset folder and update features_file
+def get_dataset_folder():
+    global features_file, model_type, dataset_folder_entry
+    dataset_folder = filedialog.askdirectory()
+    
+    if dataset_folder:
+        folder_name = os.path.basename(os.path.normpath(dataset_folder))
+        # Set the features file name based on the dataset folder's name
+        features_file = f'{folder_name}_features_{model_type}.pkl'
+        dataset_folder_entry.delete(0, ctk.END)
+        dataset_folder_entry.insert(0, dataset_folder)
+        
+        print(f"Features file set to: {features_file}")
+
+# Get input image
+def get_image_path():
+    global input_image_entry
+    input_image = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.jfif")])
+    if input_image:
+        input_image_entry.delete(0, ctk.END)
+        input_image_entry.insert(0, input_image)
+
+# Run text search in thread
+def run_text_search():
+    global model_type, features_file, isTextSearch
+    
+    # Get model, dataset folder and input image
+    current_model_type = model_type
+    print(f"Current model type: {current_model_type}")
+    dataset_folder_path = dataset_folder_entry.get().strip()
+    prompt = text_search_entry.get().strip()
+    isTextSearch = True
+    
+    # Get similarity threshold and number of similar images
+    similarity_threshold = float(threshold_entry.get()) if threshold_entry.get().strip() else 0.12
+    num_similar_images = int(top_k_entry.get()) if top_k_entry.get().isdigit() else 5
+    
+    # Get model and run text search
+    model, transform = setup_model_and_transform(current_model_type)
+    
+    similar_images = find_similar_images(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
+    
+    # Update GUI with results
+    update_gui_with_similar_images(similar_images)
+
+# Update GUI after text search
+def update_gui_with_similar_images(similar_images):
+    global root
+    if similar_images:
+        root.after(0, lambda: plot_similar_images_scrollable(similar_images))
+    else:
+        root.after(0, lambda: messagebox.showinfo("Info", "No similar images found."))
+
+# Text search function
+def search_by_text():
+    threading.Thread(target=run_text_search, daemon=True).start()
+
+# Run similarity search in thread
+def run_similarity():
+    global model_type, features_file, isTextSearch
+    
+    # Get model, dataset folder and input image
+    current_model_type = model_type
+    input_image_path = input_image_entry.get().strip()
+    dataset_folder_path = dataset_folder_entry.get().strip()
+    isTextSearch = False
+    
+    # Get similarity threshold and number of similar images
+    similarity_threshold = float(threshold_entry.get()) if threshold_entry.get().strip() else 0.2
+    num_similar_images = int(top_k_entry.get()) if top_k_entry.get().isdigit() else 5
+    
+    # Get model and run similarity
+    model, transform = setup_model_and_transform(current_model_type)
+    similar_images = find_similar_images(input_image_path, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
+    
+    # Update GUI with results
+    update_gui_with_similar_images(similar_images)
+
+# Get and plot similar images
+def get_and_plot_similar_images():
+    threading.Thread(target=run_similarity, daemon=True).start()
+
+# Run clustering in thread
+def run_clustering():
+    global model_type, features_file, clusters, current_cluster_index
+
+    current_model_type = model_type
+    # Get dataset folder
+    dataset_folder_path = dataset_folder_entry.get().strip()
+    
+    # Get similarity threshold and Max number of clusters
+    similarity_threshold = float(threshold_entry.get()) if threshold_entry.get().strip() else None
+    max_clusters = int(max_num_clusters_entry.get()) if max_num_clusters_entry.get().isdigit() else None
+    
+    min_images_cluster = int(min_images_per_cluster_entry.get()) if min_images_per_cluster_entry.get().isdigit() else None
+    max_images_cluster = int(max_images_per_cluster_entry.get()) if max_images_per_cluster_entry.get().isdigit() else None
+    
+    model, transform = setup_model_and_transform(current_model_type)
+    current_cluster_index = 0
+    clusters = cluster_similar_images(dataset_folder_path, features_file, model, transform, max_clusters, similarity_threshold, min_images_cluster, max_images_cluster, current_model_type)
+    
+    # Update GUI with results
+    update_gui_with_clusters(clusters)
+
+# Update GUI after clustering
+def update_gui_with_clusters(clusters_result):
+    global root, current_cluster_index
+    if clusters_result:
+        root.after(0, lambda: plot_image_clusters_scrollable(clusters_result, cluster_index=current_cluster_index))
+    else:
+        root.after(0, lambda: messagebox.showinfo("Info", "No image clusters found."))
+
+# Get and plot image clusters
+def get_and_plot_image_clusters():
+    threading.Thread(target=run_clustering, daemon=True).start()
+
+# Get next cluster when "Next Cluster" button is clicked
+def next_cluster():
+    global current_cluster_index
+    if clusters and current_cluster_index < len(clusters) - 1:
+        current_cluster_index += 1
+        update_cluster_plot(clusters, cluster_index=current_cluster_index)
+
+# Get previous cluster when "Previous Cluster" button is clicked
+def previous_cluster():
+    global current_cluster_index
+    if clusters and current_cluster_index > 0:
+        current_cluster_index -= 1
+        update_cluster_plot(clusters, cluster_index=current_cluster_index)
+
+#-------------------------- CustomTkinter GUI -----------------------------#
+
+def create_gui(root_window):
+    global root, dataset_folder_entry, text_search_entry, input_image_entry
+    global threshold_entry, top_k_entry, max_num_clusters_entry
+    global min_images_per_cluster_entry, max_images_per_cluster_entry
+    
+    root = root_window
+    
     # Set theme and color
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
@@ -380,140 +568,8 @@ def create_gui(root):
     # Configure grid
     root.grid_rowconfigure(0, weight=1)
     root.grid_columnconfigure(0, weight=1)
-    
-    # Get model type
-    def get_model_type(choice):
-        global model_type
-        model_type = choice
-    
-    # Get dataset folder and update features_file
-    def get_dataset_folder(dataset_folder_entry):
-        global features_file, model_type
-        dataset_folder = filedialog.askdirectory()
-        
-        if dataset_folder:
-            folder_name = os.path.basename(os.path.normpath(dataset_folder))
-            # Set the features file name based on the dataset folder's name
-            features_file = f'{folder_name}_dataset_features_{model_type}.pkl'
-            dataset_folder_entry.delete(0, ctk.END)
-            dataset_folder_entry.insert(0, dataset_folder)
-            
-            print(f"Features file set to: {features_file}")
-    
-    # Get input image
-    def get_image_path(input_image_entry):
-        input_image = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.jfif")])
-        if input_image:
-            input_image_entry.delete(0, ctk.END)
-            input_image_entry.insert(0, input_image)
 
-    # Text search function
-    def search_by_text():
-        def run_text_search():
-            global model_type, features_file, isTextSearch
-            
-            # Get model, dataset folder and input image
-            current_model_type = model_type
-            print(f"Current model type: {current_model_type}")
-            dataset_folder_path = dataset_folder.get().strip()
-            prompt = text_search.get().strip()
-            isTextSearch = True
-            
-            # Get similarity threshold and number of similar images
-            similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.12
-            num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
-            
-            # Get model and run text search
-            model, transform = setup_model_and_transform(current_model_type)
-            
-            similar_images = find_similar_images(prompt, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
-            
-          # Update GUI with results using efficient scrollable plot
-            def update_gui():
-                if similar_images:
-                    plot_similar_images_scrollable(similar_images)
-                else:
-                    messagebox.showinfo("Info", "No similar images found.")
-            
-            root.after(0, update_gui)
-        
-        threading.Thread(target=run_text_search, daemon=True).start()
-    
-    # Get and plot similar images
-    def get_and_plot_similar_images():
-        def run_similarity():
-            global model_type, features_file, isTextSearch
-            
-            # Get model, dataset folder and input image
-            current_model_type = model_type
-            input_image_path = input_image.get().strip()
-            dataset_folder_path = dataset_folder.get().strip()
-            isTextSearch = False
-            
-            # Get similarity threshold and number of similar images
-            similarity_threshold = float(threshold.get()) if threshold.get().strip() else 0.2
-            num_similar_images = int(top_k.get()) if top_k.get().isdigit() else 5
-            
-            # Get model and run similarity
-            model, transform = setup_model_and_transform(current_model_type)
-            similar_images = find_similar_images(input_image_path, dataset_folder_path, features_file, model, transform, num_similar_images, similarity_threshold, current_model_type)
-            
-            # Update GUI with results using efficient scrollable plot
-            def update_gui():
-                if similar_images:
-                    plot_similar_images_scrollable(similar_images)
-                else:
-                    messagebox.showinfo("Info", "No similar images found.")
-            
-            root.after(0, update_gui)
-        
-        threading.Thread(target=run_similarity, daemon=True).start()
-    
-    # Get and plot image clusters
-    def get_and_plot_image_clusters():
-        def run_clustering():
-            global model_type, features_file, clusters, current_cluster_index
-
-            current_model_type = model_type
-            # Get dataset folder
-            dataset_folder_path = dataset_folder.get().strip()
-            
-            # Get similarity threshold and Max number of clusters
-            similarity_threshold = float(threshold.get()) if threshold.get().strip() else None
-            max_clusters = int(max_num_clusters.get()) if max_num_clusters.get().isdigit() else None
-            
-            min_images_cluster = int(min_images_per_cluster.get()) if min_images_per_cluster.get().isdigit() else None
-            max_images_cluster = int(max_images_per_cluster.get()) if max_images_per_cluster.get().isdigit() else None
-            
-            model, transform = setup_model_and_transform(current_model_type)
-            current_cluster_index = 0
-            clusters = cluster_similar_images(dataset_folder_path, features_file, model, transform, max_clusters, similarity_threshold, min_images_cluster, max_images_cluster, current_model_type)
-            
-            def update_gui():
-                if clusters:
-                    plot_image_clusters_scrollable(clusters, cluster_index=current_cluster_index)
-                else:
-                    messagebox.showinfo("Info", "No image clusters found.")
-            
-            root.after(0, update_gui)
-        
-        threading.Thread(target=run_clustering, daemon=True).start()
-    
-    # Get next cluster when "Next Cluster" button is clicked
-    def next_cluster():
-        global current_cluster_index
-        if clusters and current_cluster_index < len(clusters) - 1:
-            current_cluster_index += 1
-            update_cluster_plot(clusters, cluster_index=current_cluster_index)
-    
-    # Get previous cluster when "Previous Cluster" button is clicked
-    def previous_cluster():
-        global current_cluster_index
-        if clusters and current_cluster_index > 0:
-            current_cluster_index -= 1
-            update_cluster_plot(clusters, cluster_index=current_cluster_index)
-
-# -------------------------- GUI Layout ------------------------------#
+    # -------------------------- GUI Layout ------------------------------#
 
     # Model selection
     ctk.CTkLabel(main_frame, text="Model Type").pack(pady=(0, 2))
@@ -531,12 +587,12 @@ def create_gui(root):
     ctk.CTkLabel(main_frame, text="Dataset Folder").pack(pady=(0, 2))
     dataset_frame = ctk.CTkFrame(main_frame)
     dataset_frame.pack(fill="x", padx=5, pady=(0, 8))
-    dataset_folder = ctk.CTkEntry(dataset_frame, width=500)
-    dataset_folder.pack(side="left", padx=5)
+    dataset_folder_entry = ctk.CTkEntry(dataset_frame, width=500)
+    dataset_folder_entry.pack(side="left", padx=5)
     ctk.CTkButton(
         dataset_frame,
         text="Browse",
-        command=lambda: get_dataset_folder(dataset_folder),
+        command=get_dataset_folder,
         width=150
     ).pack(side="right", padx=5)
     
@@ -544,8 +600,8 @@ def create_gui(root):
     ctk.CTkLabel(main_frame, text="Text Search").pack(pady=(0, 2))
     text_search_frame = ctk.CTkFrame(main_frame)
     text_search_frame.pack(fill="x", padx=5, pady=(0, 8))
-    text_search = ctk.CTkEntry(text_search_frame, width=500)
-    text_search.pack(side="left", padx=5)
+    text_search_entry = ctk.CTkEntry(text_search_frame, width=500)
+    text_search_entry.pack(side="left", padx=5)
     ctk.CTkButton(
         text_search_frame,
         text="Search",
@@ -557,36 +613,36 @@ def create_gui(root):
     ctk.CTkLabel(main_frame, text="Input Image").pack(pady=(0, 2))
     input_image_frame = ctk.CTkFrame(main_frame)
     input_image_frame.pack(fill="x", padx=5, pady=(0, 8))
-    input_image = ctk.CTkEntry(input_image_frame, width=500)
-    input_image.pack(side="left", padx=5)
+    input_image_entry = ctk.CTkEntry(input_image_frame, width=500)
+    input_image_entry.pack(side="left", padx=5)
     ctk.CTkButton(
         input_image_frame,
         text="Browse",
-        command=lambda: get_image_path(input_image),
+        command=get_image_path,
         width=150
     ).pack(side="right", padx=5)
     
     # Similarity parameters
     ctk.CTkLabel(main_frame, text="Similarity Threshold").pack(pady=(0, 2))
-    threshold = ctk.CTkEntry(main_frame, width=400)
-    threshold.pack(pady=(0, 8))
+    threshold_entry = ctk.CTkEntry(main_frame, width=400)
+    threshold_entry.pack(pady=(0, 8))
     
     ctk.CTkLabel(main_frame, text="Number of Similar Images").pack(pady=(0, 2))
-    top_k = ctk.CTkEntry(main_frame, width=400)
-    top_k.pack(pady=(0, 8))
+    top_k_entry = ctk.CTkEntry(main_frame, width=400)
+    top_k_entry.pack(pady=(0, 8))
     
     # Clustering parameters
     ctk.CTkLabel(main_frame, text="Max Number of Clusters").pack(pady=(0, 2))
-    max_num_clusters = ctk.CTkEntry(main_frame, width=400)
-    max_num_clusters.pack(pady=(0, 8))
+    max_num_clusters_entry = ctk.CTkEntry(main_frame, width=400)
+    max_num_clusters_entry.pack(pady=(0, 8))
     
     ctk.CTkLabel(main_frame, text="Min Images per Cluster").pack(pady=(0, 2))
-    min_images_per_cluster = ctk.CTkEntry(main_frame, width=400)
-    min_images_per_cluster.pack(pady=(0, 8))
+    min_images_per_cluster_entry = ctk.CTkEntry(main_frame, width=400)
+    min_images_per_cluster_entry.pack(pady=(0, 8))
     
     ctk.CTkLabel(main_frame, text="Max Images per Cluster").pack(pady=(0, 2))
-    max_images_per_cluster = ctk.CTkEntry(main_frame, width=400)
-    max_images_per_cluster.pack(pady=(0, 8))
+    max_images_per_cluster_entry = ctk.CTkEntry(main_frame, width=400)
+    max_images_per_cluster_entry.pack(pady=(0, 8))
     
     # Action buttons
     action_frame = ctk.CTkFrame(main_frame)
