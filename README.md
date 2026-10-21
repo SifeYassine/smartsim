@@ -4,6 +4,22 @@ A PyTorch desktop tool for **image similarity search** and **hierarchical cluste
 
 Point SmartSim at a folder of images and it can find the pictures most similar to a query image, find images matching a **natural-language description** (with CLIP), or automatically group the whole folder into clusters of visually similar images. Everything is driven from a simple CustomTkinter GUI.
 
+<p align="center">
+  <img src="screenshots/main-window.png" alt="SmartSim main window" width="45%" />
+</p>
+
+Text search with CLIP ("a ladybug on a green leaf"):
+
+![Text search](screenshots/text-search.png)
+
+Image search with a husky as the query:
+
+![Image search](screenshots/image-search.jpg)
+
+Clustering, one of the ten clusters:
+
+![Clustering](screenshots/clustering.jpg)
+
 ## Features
 
 - **Two backbone models**
